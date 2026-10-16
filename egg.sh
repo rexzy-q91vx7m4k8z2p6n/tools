@@ -155,6 +155,7 @@ use Pterodactyl\Models\Egg;
 use Pterodactyl\Models\Node;
 use Pterodactyl\Models\Allocation;
 use Pterodactyl\Services\Eggs\Sharing\EggImporterService;
+use Illuminate\Http\UploadedFile;
 
 $eggFile = '/tmp/egg-rexzystore.json';
 
@@ -163,14 +164,20 @@ if (!file_exists($eggFile)) {
     exit(1);
 }
 
-// ===== 1. CREATE NEST =====
-$nestName = 'Bot WhatsApp';
-
 try {
-    $nest = Nest::where('name', $nestName)->first();
+    // ===== 1. CREATE / GET NEST (id 5) =====
+    $nestId = 5;
+    $nestName = 'Bot WhatsApp';
+
+    $nest = Nest::find($nestId);
+
+    if (!$nest) {
+        $nest = Nest::where('name', $nestName)->first();
+    }
 
     if (!$nest) {
         $nest = new Nest();
+        $nest->id = $nestId;
         $nest->name = $nestName;
         $nest->description = 'Nest untuk bot WhatsApp';
         $nest->author = 'rexzystore@gmail.com';
@@ -180,85 +187,77 @@ try {
         echo "NEST_EXISTS:" . $nest->id . "\n";
     }
 
-    // ===== 2. IMPORT EGG =====
+    // ===== 2. IMPORT EGG PAKAI UploadedFile =====
+    $tmpCopy = tempnam(sys_get_temp_dir(), 'egg_') . '.json';
+    copy($eggFile, $tmpCopy);
+
+    $uploaded = new UploadedFile(
+        $tmpCopy,
+        'egg-rexzystore.json',
+        'application/json',
+        null,
+        true
+    );
+
     $importer = app(EggImporterService::class);
-    $egg = $importer->handle($nest->id, $eggFile);
+    $egg = $importer->handle($uploaded, $nest->id);
 
     echo "EGG_IMPORTED:" . $egg->id . ":" . $egg->name . "\n";
 
-    // ===== 3. CREATE ALLOCATIONS UNTUK SEMUA NODE =====
-    $nodes = Node::all();
+    @unlink($tmpCopy);
 
-    if ($nodes->count() === 0) {
-        echo "ALLOC_WARN:Tidak ada node ditemukan\n";
+    // ===== 3. CREATE ALLOCATIONS DI NODE ID 1 =====
+    $nodeId = 1;
+    $node = Node::find($nodeId);
+
+    if (!$node) {
+        echo "ALLOC_WARN:Node ID 1 tidak ditemukan\n";
     } else {
+        echo "NODE:" . $node->id . ":" . $node->name . "\n";
+
         $ip = '0.0.0.0';
         $portStart = 2000;
         $portEnd = 2900;
 
-        $totalCreated = 0;
-        $totalSkipped = 0;
+        $created = 0;
+        $skipped = 0;
+        $batch = [];
 
-        foreach ($nodes as $node) {
-            echo "NODE:" . $node->id . ":" . $node->name . "\n";
+        for ($p = $portStart; $p <= $portEnd; $p++) {
+            $exists = Allocation::where('node_id', $node->id)
+                ->where('ip', $ip)
+                ->where('port', $p)
+                ->exists();
 
-            // Cek IP allocation di node tersebut
-            $nodeIps = Allocation::where('node_id', $node->id)
-                ->distinct()
-                ->pluck('ip')
-                ->toArray();
-
-            $targetIp = $ip;
-
-            if (!empty($nodeIps) && !in_array($ip, $nodeIps)) {
-                $targetIp = $ip;
+            if ($exists) {
+                $skipped++;
+                continue;
             }
 
-            $created = 0;
-            $skipped = 0;
-            $batch = [];
+            $batch[] = [
+                'node_id' => $node->id,
+                'ip' => $ip,
+                'port' => $p,
+                'ip_alias' => null,
+                'server_id' => null,
+                'notes' => null,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ];
 
-            for ($p = $portStart; $p <= $portEnd; $p++) {
-                $exists = Allocation::where('node_id', $node->id)
-                    ->where('ip', $targetIp)
-                    ->where('port', $p)
-                    ->exists();
-
-                if ($exists) {
-                    $skipped++;
-                    continue;
-                }
-
-                $batch[] = [
-                    'node_id' => $node->id,
-                    'ip' => $targetIp,
-                    'port' => $p,
-                    'ip_alias' => null,
-                    'server_id' => null,
-                    'notes' => null,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ];
-
-                if (count($batch) >= 200) {
-                    Allocation::insert($batch);
-                    $created += count($batch);
-                    $batch = [];
-                }
-            }
-
-            if (!empty($batch)) {
+            if (count($batch) >= 200) {
                 Allocation::insert($batch);
                 $created += count($batch);
+                $batch = [];
             }
-
-            echo "ALLOC_NODE:" . $node->id . ":created=" . $created . ":skipped=" . $skipped . "\n";
-
-            $totalCreated += $created;
-            $totalSkipped += $skipped;
         }
 
-        echo "ALLOC_TOTAL:created=" . $totalCreated . ":skipped=" . $totalSkipped . "\n";
+        if (!empty($batch)) {
+            Allocation::insert($batch);
+            $created += count($batch);
+        }
+
+        echo "ALLOC_NODE:" . $node->id . ":created=" . $created . ":skipped=" . $skipped . "\n";
     }
 
     echo "SUCCESS\n";
@@ -278,10 +277,10 @@ if [ $EXIT_CODE -eq 0 ]; then
   echo -e "${GREEN}========================================${NC}"
   echo -e "${GREEN}   NEST + EGG + ALLOCATION BERHASIL${NC}"
   echo -e "${GREEN}========================================${NC}"
-  echo -e "${CYAN}📦 Nest       : Bot WhatsApp${NC}"
+  echo -e "${CYAN}📦 Nest       : Bot WhatsApp (ID 5)${NC}"
   echo -e "${CYAN}🥚 Egg        : RexzyStore🌐${NC}"
   echo -e "${CYAN}🌐 IP         : 0.0.0.0${NC}"
-  echo -e "${CYAN}🔢 Port Range : 2000-2900${NC}"
+  echo -e "${CYAN}🔢 Port Range : 2000-2900 (Node ID 1)${NC}"
   echo -e "${GREEN}========================================${NC}"
 else
   echo ""
